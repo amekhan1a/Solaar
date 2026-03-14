@@ -1015,6 +1015,7 @@ class LEDParam:
     ramp = "ramp"
     form = "form"
     saturation = "saturation"
+    direction = "direction"
 
 
 class LedRampChoice(IntEnum):
@@ -1022,6 +1023,9 @@ class LedRampChoice(IntEnum):
     YES = 1
     NO = 2
 
+class LedDirectionChoice(IntEnum):
+    LTR = 0
+    RTL = 1
 
 class LedFormChoices(IntEnum):
     DEFAULT = 0
@@ -1041,6 +1045,7 @@ LEDParamSize = {
     LEDParam.ramp: 1,
     LEDParam.form: 1,
     LEDParam.saturation: 1,
+    LEDParam.direction: 1,
 }
 # not implemented from x8070 Wave=4, Stars=5, Press=6, Audio=7
 # not implemented from x8071 Custom=12, Kitt=13, HSVPulsing=20,
@@ -1050,6 +1055,7 @@ LEDEffects = {
     0x01: [NamedInt(0x01, _("Static")), {LEDParam.color: 0, LEDParam.ramp: 3}],
     0x02: [NamedInt(0x02, _("Pulse")), {LEDParam.color: 0, LEDParam.speed: 3}],
     0x03: [NamedInt(0x03, _("Cycle")), {LEDParam.period: 5, LEDParam.intensity: 7}],
+    0x04: [NamedInt(0x04, _("Color Wave")), {LEDParam.period: 0, LEDParam.intensity: 0, LEDParam.direction: 0}],
     0x08: [NamedInt(0x08, _("Boot")), {}],
     0x09: [NamedInt(0x09, _("Demo")), {}],
     0x0A: [
@@ -1063,6 +1069,11 @@ LEDEffects = {
     0x15: [NamedInt(0x15, _("CycleS")), {LEDParam.saturation: 1, LEDParam.period: 6, LEDParam.intensity: 8}],
 }
 
+def _color_wave_last(period_ms):
+    return round(0.004064 * period_ms - 1.4658)
+
+def _color_wave_period(last):
+    return round((last + 1.4658) / 0.004064)
 
 class LEDEffectSetting:  # an effect plus its parameters
     def __init__(self, **kwargs):
@@ -1073,9 +1084,17 @@ class LEDEffectSetting:  # an effect plus its parameters
     @classmethod
     def from_bytes(cls, bytes, options=None):
         ID = next((ze.ID for ze in options if ze.index == bytes[0]), None) if options is not None else bytes[0]
-        effect = LEDEffects[ID] if ID in LEDEffects else None
+        effect = LEDEffects.get(ID)
         args = {"ID": effect[0] if effect else None}
-        if effect:
+        if ID == 0x04:
+            val = struct.unpack_from("<H", bytes, 7)[0]
+            args = {
+                "ID": NamedInt(0x04, _("Color Wave")),
+                "period": _color_wave_period(bytes[10]),
+                "intensity": bytes[9],
+                "direction": 1 if val >= 1024 else 0,
+            }
+        elif effect:
             for p, b in effect[1].items():
                 args[str(p)] = common.bytes2int(bytes[1 + b : 1 + b + LEDParamSize[p]])
         else:
@@ -1086,14 +1105,25 @@ class LEDEffectSetting:  # an effect plus its parameters
         ID = self.ID
         if ID is None:
             return self.bytes if hasattr(self, "bytes") else b"\xff" * 11
-        else:
-            bs = [0] * 10
-            for p, b in LEDEffects[ID][1].items():
-                bs[b : b + LEDParamSize[p]] = common.int2bytes(getattr(self, str(p), 0), LEDParamSize[p])
-            if options is not None:
-                ID = next((ze.index for ze in options if ze.ID == ID), None)
-            result = common.int2bytes(ID, 1) + bytes(bs)
-            return result
+        if int(ID) == 0x04:
+            last = _color_wave_last(getattr(self, "period", 2500))
+            val = 506 - 6 * last
+            if val < 256:
+                val = 288
+            if getattr(self, "direction", 0):
+                val += 1280
+            raw = bytearray(11)
+            raw[0] = 0x04
+            struct.pack_into("<H", raw, 7, val)
+            raw[9] = getattr(self, "intensity", 100)
+            raw[10] = last
+            return bytes(raw)
+        bs = [0] * 10
+        for p, b in LEDEffects[ID][1].items():
+            bs[b : b + LEDParamSize[p]] = common.int2bytes(getattr(self, str(p), 0), LEDParamSize[p])
+        if options is not None:
+            ID = next((ze.index for ze in options if ze.ID == ID), None)
+        return common.int2bytes(ID, 1) + bytes(bs)
 
     @classmethod
     def from_yaml(cls, loader, node):
@@ -1185,7 +1215,15 @@ class RGBEffectsInfo(LEDEffectsInfo):  # effects that the LEDs can do using RGB_
         self.readable = capabilities & 0x1
         self.zones = []
         for i in range(0, self.count):
-            self.zones.append(LEDZoneInfo(SupportedFeature.RGB_EFFECTS, 0x00, 1, 0x00, device, i))
+            zone = LEDZoneInfo(SupportedFeature.RGB_EFFECTS, 0x00, 1, 0x00, device, i)
+            if not any(e.ID == 0x04 for e in zone.effects):
+                zone.effects.append(LEDEffectInfo.__new__(LEDEffectInfo))
+                zone.effects[-1].zindex = zone.index
+                zone.effects[-1].index = len(zone.effects) - 1
+                zone.effects[-1].ID = 0x04
+                zone.effects[-1].capabilities = 0
+                zone.effects[-1].period = 0
+            self.zones.append(zone)
 
 
 class ButtonBehavior(IntEnum):

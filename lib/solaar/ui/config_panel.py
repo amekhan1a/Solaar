@@ -562,7 +562,7 @@ class HeteroKeyControl(Gtk.HBox, Control):
             item_box = ComboBoxText()
             if item["kind"] == settings.Kind.CHOICE:
                 for entry in item["choices"]:
-                    item_box.append(str(int(entry)), str(entry))
+                    item_box.append(str(int(entry)), entry.name)
                 item_box.set_active(0)
                 item_box.connect(GtkSignal.CHANGED.value, self.changed)
                 self.pack_start(item_box, False, False, 0)
@@ -619,6 +619,8 @@ class HeteroKeyControl(Gtk.HBox, Control):
             if lblbox:
                 lblbox.set_visible(visible)
             box.set_visible(visible)
+            if name == "period" and isinstance(box, Scale):  # adjust period range per effect
+                box.set_range(1000 if id_ == 0x04 else 1000, 20000)
 
     def changed(self, control):
         if self.get_sensitive() and control.get_sensitive():
