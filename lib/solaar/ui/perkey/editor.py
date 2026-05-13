@@ -34,6 +34,7 @@ from gi.repository import Gtk  # NOQA: E402
 from solaar.i18n import _  # NOQA: E402
 
 from . import binding  # NOQA: E402
+from ._icons import attach_themed_icon  # NOQA: E402
 from .canvas import KeyboardCanvas  # NOQA: E402
 from .layout import Layout  # NOQA: E402
 from .palette import GradientSwatch  # NOQA: E402
@@ -56,6 +57,11 @@ _TOOL_LABELS = {
 }
 _TOOL_TOOLTIPS = {
     "gradient": _("Drag to fade from previous color to active color"),
+}
+_TOOL_ICON_NAMES = {
+    "single": "solaar-tool-brush-symbolic",
+    "rect": "solaar-tool-rect-symbolic",
+    "bucket": "solaar-tool-bucket-symbolic",
 }
 
 
@@ -81,9 +87,15 @@ class PerKeyEditor(Gtk.Box):
                 btn.set_tooltip_text(_TOOL_TOOLTIPS["gradient"])
             else:
                 label, tip = _TOOL_LABELS.get(name, (name, ""))
-                btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
+                icon_name = _TOOL_ICON_NAMES.get(name)
+                btn = Gtk.RadioButton.new_from_widget(first)
                 btn.set_mode(False)  # render as toggle button rather than radio
-                btn.set_tooltip_text(tip)
+                if icon_name and attach_themed_icon(btn, icon_name) is not None:
+                    btn.set_tooltip_text(tip or label)
+                    btn.get_accessible().set_name(label)
+                else:
+                    btn.set_label(label)
+                    btn.set_tooltip_text(tip)
             btn.connect(GtkSignal.TOGGLED.value, self._on_tool_toggled, name)
             if first is None:
                 first = btn
@@ -114,6 +126,9 @@ class PerKeyEditor(Gtk.Box):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.set_propagate_natural_width(True)
         scroll.set_propagate_natural_height(True)
+        # Inset frame around the keyboard so it reads as a distinct panel
+        # rather than floating flat against the dialog background.
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
         self._canvas = KeyboardCanvas()
         self._canvas.connect(GtkSignal.PAINT.value, self._on_canvas_paint)
         scroll.add(self._canvas)
@@ -128,7 +143,6 @@ class PerKeyEditor(Gtk.Box):
             logger.debug("zone_base_color read failed: %s", e)
             base = None
         self._canvas.set_zone_base_color(base)
-        self._palette.set_zone_base_color(base)
         self._refresh_layout()
         self._sync_from_sink()
         self._unsubscribe = sink.subscribe(self._on_sink_update)
@@ -140,12 +154,10 @@ class PerKeyEditor(Gtk.Box):
             except Exception as e:
                 logger.debug("perkey sink unsubscribe failed: %s", e)
             self._unsubscribe = None
-
-    def canvas_size(self) -> tuple[int, int]:
-        """Return the canvas's pixel size_request — what the dialog should
-        size its content area to so the layout fits without scrollbars.
-        """
-        return self._canvas.get_size_request()
+        try:
+            self._palette.shutdown()
+        except Exception as e:
+            logger.debug("palette shutdown failed: %s", e)
 
     def _refresh_layout(self) -> None:
         if self._layout is None:

@@ -35,6 +35,10 @@ from gi.repository import Gtk  # NOQA: E402
 
 from solaar.i18n import _  # NOQA: E402
 
+from ._icons import attach_themed_icon  # NOQA: E402
+
+_UNSET_ICON_NAME = "solaar-tool-palette-off-symbolic"
+
 
 class GtkSignal(Enum):
     DRAW = "draw"
@@ -62,70 +66,6 @@ def _int_to_rgba(c: int) -> Gdk.RGBA:
     return rgba
 
 
-def _draw_hash(cr, x: float, y: float, size: float, base_color: int | None = None) -> None:
-    """Diagonal hash pattern used as the visual for "no change" / unset.
-
-    Background is the zone base color (the color these cells actually display
-    on the keyboard) when known; stripes pick a black or white contrast based
-    on luminance so the texture stays readable on any base.
-    """
-    cr.save()
-    cr.rectangle(x, y, size, size)
-    cr.clip()
-    if base_color is not None and base_color >= 0:
-        r = ((base_color >> 16) & 0xFF) / 255.0
-        g = ((base_color >> 8) & 0xFF) / 255.0
-        b = (base_color & 0xFF) / 255.0
-        cr.set_source_rgba(r, g, b, 1.0)
-    else:
-        r = g = 0.30
-        b = 0.32
-        cr.set_source_rgba(r, g, b, 1.0)
-    cr.rectangle(x, y, size, size)
-    cr.fill()
-    if base_color is not None and base_color >= 0:
-        lum = 0.299 * r + 0.587 * g + 0.114 * b
-        cr.set_source_rgba(0, 0, 0, 0.45) if lum > 0.55 else cr.set_source_rgba(1, 1, 1, 0.35)
-    else:
-        cr.set_source_rgba(0.55, 0.55, 0.60, 1.0)
-    cr.set_line_width(1.2)
-    step = 4
-    d = -int(size)
-    while d <= int(size):
-        cr.move_to(x + d, y + size)
-        cr.line_to(x + d + size, y)
-        cr.stroke()
-        d += step
-    cr.restore()
-
-
-class HashSwatch(Gtk.DrawingArea):
-    """Square showing the diagonal hash pattern; used as the visual on the
-    "unset" toggle button and matches how unset cells render on the canvas.
-    Set the zone base color via `set_base_color` so the swatch reflects what
-    "no change" cells actually display on the keyboard.
-    """
-
-    SIZE = 22
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._base_color: int | None = None
-        self.set_size_request(self.SIZE, self.SIZE)
-        self.connect(GtkSignal.DRAW.value, self._on_draw)
-
-    def set_base_color(self, color: int | None) -> None:
-        self._base_color = None if color is None else int(color)
-        self.queue_draw()
-
-    def _on_draw(self, _w, cr) -> None:
-        _draw_hash(cr, 0, 0, float(self.SIZE), self._base_color)
-        cr.set_source_rgba(0, 0, 0, 0.45)
-        cr.set_line_width(1.0)
-        cr.rectangle(0.5, 0.5, self.SIZE - 1, self.SIZE - 1)
-        cr.stroke()
-
-
 # Sentinel for "no change" / unset paint. Matches special_keys.COLORSPLUS["No change"].
 UNSET_COLOR = -1
 
@@ -151,15 +91,21 @@ class Palette(Gtk.Box):
         self._color_btn.connect(GtkSignal.COLOR_SET.value, self._on_color_set)
         self.pack_start(self._color_btn, False, False, 0)
 
-        self._unset_swatch = HashSwatch()
         self._unset_btn = Gtk.ToggleButton()
         self._unset_btn.set_tooltip_text(_("Paint as 'no change' — clears the cell to the zone base color"))
-        self._unset_btn.add(self._unset_swatch)
+        unset_label = _("Unset")
+        if attach_themed_icon(self._unset_btn, _UNSET_ICON_NAME) is not None:
+            self._unset_btn.get_accessible().set_name(unset_label)
+        else:
+            self._unset_btn.set_label(unset_label)
         self._unset_btn.connect(GtkSignal.TOGGLED.value, self._on_unset_toggled)
         self.pack_start(self._unset_btn, False, False, 0)
 
-    def set_zone_base_color(self, color: int | None) -> None:
-        self._unset_swatch.set_base_color(color)
+    def shutdown(self) -> None:
+        # attach_themed_icon connects to the button's own style-updated
+        # signal; GTK disconnects it automatically when the button is
+        # destroyed, so there is nothing to clean up here.
+        pass
 
     def _on_color_set(self, btn: Gtk.ColorButton) -> None:
         c = _rgb_to_int(btn.get_rgba())
@@ -213,6 +159,10 @@ class GradientSwatch(Gtk.DrawingArea):
         self._active: int = 0xFF0000
         self._previous: int = 0xFF0000
         self.connect(GtkSignal.DRAW.value, self._on_draw)
+        # Re-render when the GTK theme changes, so the rounded-square
+        # outline (drawn in the theme foreground color) stays in sync
+        # with the tool icons next to it.
+        self.connect("style-updated", lambda w: w.queue_draw())
 
     def update(self, active: int, previous: int) -> None:
         self._active = int(active)
@@ -229,27 +179,57 @@ class GradientSwatch(Gtk.DrawingArea):
         """Return (active, previous) — the colors the gradient tool will paint with."""
         return (self._active, self._previous)
 
+    @staticmethod
+    def _rounded_rect_path(cr, x: float, y: float, w: float, h: float, r: float) -> None:
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -1.5708, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+        cr.arc(x + r, y + h - r, r, 1.5708, 3.1416)
+        cr.arc(x + r, y + r, r, 3.1416, 4.7124)
+        cr.close_path()
+
     def _on_draw(self, _w, cr) -> None:
         import cairo  # local: keeps the module light when GradientSwatch isn't built
-
-        s = self.SIZE
 
         def rgb(c: int) -> tuple[float, float, float]:
             if c is None or c < 0:
                 return (0.5, 0.5, 0.5)
             return (((c >> 16) & 0xFF) / 255.0, ((c >> 8) & 0xFF) / 255.0, (c & 0xFF) / 255.0)
 
+        # Render in Tabler "square" coordinates (24x24 viewBox, rounded
+        # rect from (3,3) to (21,21), corner radius 2, stroke 2) and let
+        # cairo scale to the swatch's pixel size. Matches the outline
+        # style of the tool icons exactly.
+        cr.save()
+        cr.scale(self.SIZE / 24.0, self.SIZE / 24.0)
+
+        # Build the rounded-square path once, clip+fill the gradient
+        # inside it, then re-build and stroke the outline in the theme
+        # foreground color.
+        self._rounded_rect_path(cr, 3, 3, 18, 18, 2)
+        cr.save()
+        cr.clip()
         # Top-left (previous, gradient start) → bottom-right (active, end).
         # Matches the directional behavior of dragging the line tool TL → BR.
-        pat = cairo.LinearGradient(0, 0, s, s)
+        # Endpoints are shifted inward by the arc inset (corner radius * (1
+        # - 1/sqrt(2)), ~0.586 for r=2) so t=0 lands on the actual visible
+        # TL corner pixel of the rounded rect — without this, the rendered
+        # corners sample at t≈0.033/0.967 and the displayed colors are
+        # ~8 RGB units short of the true endpoint colors.
+        inset = 2 * (1 - 1 / (2**0.5))
+        pat = cairo.LinearGradient(3 + inset, 3 + inset, 21 - inset, 21 - inset)
         pat.add_color_stop_rgb(0.0, *rgb(self._previous))
         pat.add_color_stop_rgb(1.0, *rgb(self._active))
         cr.set_source(pat)
-        cr.rectangle(0, 0, s, s)
+        cr.rectangle(3, 3, 18, 18)
         cr.fill()
+        cr.restore()  # drop clip
 
-        # Subtle border so the swatch reads as a control even on similar bg.
-        cr.set_source_rgba(0, 0, 0, 0.45)
-        cr.set_line_width(1.0)
-        cr.rectangle(0.5, 0.5, s - 1, s - 1)
+        self._rounded_rect_path(cr, 3, 3, 18, 18, 2)
+        fg = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, fg.alpha)
+        cr.set_line_width(2)
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
         cr.stroke()
+        cr.restore()
